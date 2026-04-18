@@ -85,3 +85,9 @@ func createTmpPartitionLog(topic string, partition string) {
 	}
 	defer f.Close()
 }
+
+/*
+To run the broker:
+- In a terminal, cd into the "kafka-clone-golang" directory
+- Then "go run ./cmd/broker", which runs the main function in main.go
+*/
