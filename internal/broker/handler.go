@@ -21,7 +21,7 @@ func appendMessages(c *gin.Context) {
 	// Bind the received JSON to producerReq
 	// - From: https://go.dev/doc/tutorial/web-service-gin#write-the-code-2
 	if err := c.BindJSON(&producerReq); err != nil {
-		return
+		panic(err)
 	}
 
 	/*
@@ -45,7 +45,6 @@ func appendMessages(c *gin.Context) {
 
 		// https://pkg.go.dev/os#OpenFile
 		// - os.O_APPEND: always write at end of file
-		// - os.O_WRONLY: write-only
 		// - os.O_RDWR: read and write
 		f, err := os.OpenFile(path, os.O_APPEND|os.O_RDWR, 0644)
 		if err != nil {
@@ -117,66 +116,64 @@ func appendMessages(c *gin.Context) {
 }
 
 /*
-Multiple partition batches would look like this
-{
-	"acks": "leader",
-	"timeoutMs": 5000,
+	Multiple partition batches would look like this
+	{
+		"acks": "leader",
+		"timeoutMs": 5000,
+		"batches": [
+			{
+				"topic": "orders",
+				"partition": 0,
+				"messages": [
+					{ "key": "123", "value": "hello" },
+					{ "key": "123", "value": "world" }
+				]
+			},
+			{
+				"topic": "orders",
+				"partition": 1,
+				"messages": [
+					{ "key": "456", "value": "foo" },
+					{ "key": "456", "value": "bar" }
+				]
+			},
+			{
+				"topic": "payments",
+				"partition": 0,
+				"messages": [
+					{ "key": "143", "value": "HELLO" },
+					{ "key": "426", "value": "WORLD" }
+				]
+			}
+		]
+	}
+
+	IMPORTANT:
+	- If using key-based partitioning, messages in the same topic with the same key
+	would go to the same partition
+	- Different entries in the same batches array could have been produced
+	using different partitioning strategies
+
+
+	WHAT IF:
 	"batches": [
 		{
-			"topic": "orders",
-			"partition": 0,
-			"messages": [
-				{ "key": "123", "value": "hello" },
-				{ "key": "123", "value": "world" }
-			]
+		"topic": "orders",
+		"partition": 0,
+		"messages": [
+			{ "key": "1", "value": "A" }
+		]
 		},
 		{
-			"topic": "orders",
-			"partition": 1,
-			"messages": [
-				{ "key": "456", "value": "foo" },
-				{ "key": "456", "value": "bar" }
-			]
-		},
-		{
-			"topic": "payments",
-			"partition": 0,
-			"messages": [
-				{ "key": "143", "value": "HELLO" },
-				{ "key": "426", "value": "WORLD" }
-			]
+		"topic": "orders",
+		"partition": 0,
+		"messages": [
+			{ "key": "2", "value": "B" }
+		]
 		}
 	]
-}
-
-IMPORTANT:
-- If using key-based partitioning, messages in the same topic with the same key
-  would go to the same partition
-- Different entries in the same batches array could have been produced
-  using different partitioning strategies
-
-
-WHAT IF:
-{
-  "batches": [
-    {
-      "topic": "orders",
-      "partition": 0,
-      "messages": [
-        { "key": "1", "value": "A" }
-      ]
-    },
-    {
-      "topic": "orders",
-      "partition": 0,
-      "messages": [
-        { "key": "2", "value": "B" }
-      ]
-    }
-  ]
-}
-- Then request order matters for that same partition.
-- The Kafka guarantee is that order of events per partition is preserved.
-- However, I should still preserve request order for batches and preserve event
-  order for each batch since the situation shown above could happen
+	- Then request order matters for that same partition.
+	- The Kafka guarantee is that order of events per partition is preserved.
+	- However, I should still preserve request order for batches and preserve event
+	order for each batch since the situation shown above could happen
 */
