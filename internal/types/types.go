@@ -14,7 +14,7 @@ type Batch struct {
 }
 
 type Event struct {
-	Key       string
-	Value     string // TODO: Use []byte later
-	Timestamp int64
+	// Key       string // TODO: Add keys later
+	Value string // TODO: Use []byte later
+	// Timestamp int64 // TODO: Add timestamp later
 }

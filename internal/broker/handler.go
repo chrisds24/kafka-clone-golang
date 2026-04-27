@@ -103,7 +103,8 @@ func appendMessages(c *gin.Context) {
 			// - Format is    key|value
 			// Using Fprintf is better than:
 			//   w.WriteString(fmt.Sprintf("%s|%s\n", event.Key, event.Value))
-			_, err := fmt.Fprintf(w, "%s|%s\n", event.Key, event.Value)
+			// _, err := fmt.Fprintf(w, "%s|%s\n", event.Key, event.Value)
+			_, err := fmt.Fprintf(w, "%s\n", event.Value) // TODO: Add key later
 			if err != nil {
 				panic(err)
 			}
@@ -112,6 +113,7 @@ func appendMessages(c *gin.Context) {
 		w.Flush()
 	}
 
+	// TODO: Edit this to send the appropriate metadata to the producer
 	c.IndentedJSON(http.StatusOK, "Messages saved!")
 }
 
