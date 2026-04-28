@@ -4,6 +4,8 @@ package producer
 FROM KafkaProducer: https://github.com/apache/kafka/blob/trunk/clients/src/main/java/org/apache/kafka/clients/producer/KafkaProducer.java
 - NOTE: There's a lot of other useful info here, but I'll just include the ones
   I'll need for now
+- EXAMPLE USAGE: https://kafka.apache.org/quickstart/
+  -- Here, they're writing events to a specific topic
 - The {@link #send(ProducerRecord) send()} method is asynchronous. When called,
   it adds the record to a buffer of pending record sends and immediately
   returns. This allows the producer to batch together individual records for
@@ -226,6 +228,8 @@ public void close()
 - Called in a constructor inside a catch branch
 
 *******************************************************************************
+*****************			SUMMARY + new info         ************************
+*******************************************************************************
 When ConsoleProducer is started:
 1.) Using command line args, creates ConsoleProducerOptions
 2.) Creates an instance of a KafkaProducer, passing in the options to be used
@@ -233,31 +237,48 @@ When ConsoleProducer is started:
 3.) (Overly simplfied) Loop as long as there's input from the user in the
     terminal. In this loop, the KafkaProducer will keep sending any input
 	given by the user in the terminal
+NOTE: The quickstart example sends records to the specified topic in the
+  options. (https://kafka.apache.org/quickstart/#step-4-write-some-events-into-the-topic)
 
-send
+send (KafkaProducer.send)
 - Summarized high-level explanation:
+  -- This is to send a record to a topic, then it runs the provided callback
+     once the send has been acknowledged. Though as mentioned below, the send
+	 is asynchronous
   -- Asynchronous: Will return once the record has been stored in the buffer
      of records waiting to be sent
-  -- Can block on first record being sent by this client to the cluster for a
-     topic (which is done to get metadata about a topic and it blocks for at
-	 most the specified amount in the max.block.ms setting)
+  -- Can block on first record being sent by this client to the cluster for the
+     given topic (which is done to get metadata about a topic and it blocks for
+	 at most the specified amount in the max.block.ms setting)
+	 + ME: To keep it simple for now, it needs info about the topic, its
+	   partitions, which are the leader brokers, which brokers are in the
+	   cluster, etc.
+	 + ********* IMPORTANT ***********: Before records can be batched, the
+	   producer needs metadata about the cluster first. So above, it
+	   literally means that it could block on the FIRST RECORD being sent to
+	   the cluster to get metadata.
   -- Can also block when allocating a buffer if the buffer pool has no free
      buffers
   -- Result is RecordMetadata which contains the partition the record was sent
      to, the offset it was assigned, and the timestamp of the record
   -- doSend: Send actually calls doSend to do the actual send
-- ----------------- Steps --------------------
+- ----------------- Steps for doSend --------------------
 - (Once again, a summarized and overly simplified explanation)
-- First, get metadata about the cluster, especially the topic and partition (if
+- First, append callback takes care of:
+  -- call interceptors and user callback on completion
+  -- remember partition that is calculated in RecordAccumulator.append
+- Second, get metadata about the cluster, especially the topic and partition (if
   specified) we want metadata about
   -- Note that cluster refers to all brokers, not just the brokers in which
      the topic's partitions (and their replicas) belong in
+     + SIDE NOTE: Also, replication factor = 3 does NOT mean that we only have
+       3 brokers. It simply means that partitions (for all topics) are
+	   replicated in 3 of those brokers.
+  -- REMINDER: As mentioned above, the send can block on the first record being
+     sent to the cluster.
   -- IMPORTANT: There's also a metadata cache
      + We just get the metadata here if we have it
 	 + WARNING: This could be stale
-  -- SIDE NOTE: Also, replication factor = 3 does NOT mean that we only have 3
-     brokers. It simply means that partitions (for all topics) are replicated
-	 in 3 of those brokers.
 - Serialize the key and the value
 - Calculate the partition
   + Just return the partition specified in the record if it has one
@@ -273,11 +294,21 @@ send
   ProducerConfig.MAX_REQUEST_SIZE_CONFIG and
   ProducerConfig.BUFFER_MEMORY_CONFIG (not larger than the configured buffer
   size)
-- Append the record to the accumulator (partition may actually be calculated
-  in the RecordAccumulator)
-- About RecordAccumulator:
+- Append the record to the accumulator
+  -- Again, partition may actually be calculated in the RecordAccumulator
+  -- ME: This is where we add the record to a batch.
+  -- NOTE: The RecordAccumulator isn't the batch itself.
+  -- In the KafkaProducer's constructor, it gives the RecordAccumulator's
+     constructor a BufferPool
+  -- ********IMPORTANT********: Relationship between KafkaProducer,
+     RecordAccumulator, BufferPool, ByteBuffer, and ProducerBatch:
+     + KafkaProducer creates a RecordAccumulator, and gives it a BufferPool.
+     + The RecordAccumulator can allocate a ByteBuffer from that pool when it
+	   needs to create a new ProducerBatch
+- ********IMPORTANT********: RecordAccumulator
   -- Acts as a queue that accumulates records into MemoryRecords instances to
      be sent to the server.
+	 + Uses a bounded amount of memory and blocks when memory is full
   -- When the instance was created in the KafkaProducer constructor, the
      following were passed:
 	 + batchSize
@@ -295,46 +326,196 @@ send
 		 ** private final long totalMemory: The maximum amount of memory that
 		    this buffer pool can allocate
 		 ** private long nonPooledAvailableMemory
-  -- ***** IMPORTANT ***** : Why Deque<ProducerBatch> instead of just
-     a ProducerBatch?
-  -- +++++++ RecordAccumulator.append +++++++
-  -- Multithreading/concurrency is involved here, such as performing the
-     operations below inside a loop to deal with race conditions
+  -- It also has the following fields:
+     * private final ConcurrentMap<String topic, TopicInfo> topicInfoMap
+	   + Basically a map that contains info about a topic
+	     ** SEE BELOW for TopicInfo
+	 * private final IncompleteBatches incomplete
+     * private final BufferPool free (already mentioned above)
+  -- ++++++++++++++ RecordAccumulator.append ++++++++++++++++
+  -- NOTE: Multithreading/concurrency is involved here
+     + Which is why we perform the operations inside ****** Loop ****** inside
+	   a loop to deal with race conditions
+  -- Description: Add a record to the accumulator, return the append result
+     + Append result will contain the metadata and a flag if the appended
+	   batch is full or a new batch has been created
+  -- First get info about the topic
+     + A TopicInfo has a ConcurrentMap<Integer partition, Deque<ProducerBatch>> batches
+       * Notice how the map contains the queue of batches to be sent for each
+	     partition
   -- ByteBuffer buffer = null
+     + If null later, this will be allocated.
+	 + This will be used when appending a new batch
+	 + ME: I initially thought that this buffer is used to store records in
+	   the queue of batches. IT IS NOT
   -- ********** Loop **********
   -- Pick a partition using BuiltInPartitioner.StickyPartitionInfo if
      partition == RecordMetadata.UNKNOWN_PARTITION
-  -- Call RecordAccumulator.tryAppend to try to append to a ProducerBatch.
-  -- If it is full, we return null and a new batch is created. The batch is
-	 also closed for record appends.
-	 + This actually calls last.tryAppend, where last is a ProducerBatch
-	   * ProducerBatch.tryAppend
-	     ** Append the record to the current record set and return the relative
-	        offset within that record set
-	     ** If full, it returns null. (Notice how this fits with what was
-		    mentioned above)
-  -- If buffer is null, allocate a new {size} byte message buffer for
-     topic {topic} partition {effectivePartition} with remaining timeout
-	 {maxTimeToBlock}ms
-  -- Call appendNewBatch to append a new batch to the queue
-     + ME: Is the point of a queue of batches simply because the producer can
-	   fill up multiple batches, then just send them in queue order?
-	   * ////// IMPORTANT /////: One batch would be for one partition in a
-	     topic, where the producer can send multiple batches that could be
-		 for different topics and partitions
-	 + TODO !!!
-  -- Returns a RecordAppendResult
+  -- Deque<ProducerBatch> dq = topicInfo.batches.computeIfAbsent(effectivePartition, k -> new ArrayDeque<>());
+     + Comment in code: "Check if we have an in-progress batch"
+	   * ME: Based on code later (in tryAppend), this in-progress batch could
+	     be full. But we won't know until we call tryAppend
+	 + Remember that topicInfo has a map of the queue of batches for each
+	   partition
+	 + computeIfAbsent is a ConcurrentMap method
+	   https://docs.oracle.com/javase/8/docs/api/java/util/concurrent/ConcurrentMap.html#computeIfAbsent-K-java.util.function.Function-
+	 + Basically, we create the queue of batches for that partition if
+	   it doesn't exist
+  -- RecordAppendResult appendResult = tryAppend(timestamp, key, value, headers, callbacks, dq, nowMs);
+     + We try to append to a ProducerBatch in the queue of batches for this
+	   partition
+  -- RecordAccumulator.tryAppend:
+     + If the ProducerBatch is full, we return null and a new batch is created.
+	   The batch is also closed for record appends.
+	 + ProducerBatch last = deque.peekLast();
+	   * if last is null (peekLast returned null), it means the queue is empty
+	     ** tryAppend ends up returning null just like if the batch is full
+		    ++ However, nothing is closed since there's no batch in the
+			   first place
+	     ** ME: Later (in appendNewBatch), we actually create a new batch to
+		    put the record into. So basically it's the same behavior if the
+			batch is full or there's no existing batch in the queue.
+			++ Only difference is if a batch is full, we close it for record
+			   appends
+	   * If not, we try to append to the last batch in the queue in
+	     FutureRecordMetadata future = last.tryAppend(timestamp, key, value, headers, callback, nowMs)
+	 + ProducerBatch.tryAppend:
+	   * Append the record to the current record set and return the relative
+	     offset within that record set
+	   * If this batch is full, it returns null.
+	   * Also mentions something about the batch possibly needing to be split
+	     (I'LL SKIP THIS FOR NOW)
+	   * Returns a FutureRecordMetadata
+	   * ******* IMPORTANT *********: A ProducerBatch actually uses
+	     MemoryRecordsBuilder to "store" records
+     + If the returned FutureRecordMetadata is null, then the batch is closed
+	   for record appends (last.closeForRecordAppends()) since it's full
+	 + Otherwise, we create a RecordAppendResult instance using the returned
+	   FutureRecordMetadata
+	   * When calling the constructor, we pass in:
+	     ** newBatchCreated is false
+		 ** batchIsFull is true based on deque.size() > 1 || last.isFull()
+	   * HOWEVER: It's weird how it uses deque.size() > 1 || last.isFull() as
+	     the boolean condition to determine if the batch is full. Why does
+		 deque.size() > 1 indicate that the batch is full?
+		 ** From ChatGPT (DOUBLE CHECK THIS)
+		    ++ deque.size() > 1 means there is already more than one batch
+			   queued for this topic-partition, which means there is backlog,
+			   so the partition should be treated as “ready enough” even if
+			   the current tail batch itself is not full. As a result, we can
+			   wake the sender
+	 + IMPORTANT: It says above that a new batch is created if the batch is
+	   full. However, I don't see it anywhere in RecordAccumulator.tryAppend
+	   and ProducerBatch.tryAppend
+	   * It's actually in appendNewBatch later
+  -- At this point RecordAccumulator.tryAppend has returned a
+     RecordAppendResult (could be null).
+	 + REMINDER: RecordAppendResult contains the future(metadata), batchIsFull,
+	   newBatchCreated, and appendedBytes
+	 + Based on the code, only two cases where null could happen:
+	   1.) Batch is full    OR    2.) queue was empty
+	 + If the append result is null, then the switch is disabled if there are
+	   any incomplete batches
+	   (GONNA SKIP what the switch means for now)
+  -- buffer = free.allocate(size, maxTimeToBlock)
+     + If buffer is null, allocate a new {size} byte message buffer for
+       topic {topic} partition {effectivePartition} with remaining timeout
+	   {maxTimeToBlock}ms
+	 + This is used below in appendNewBatch
+  -- ******** CHECKPOINT *********
+     + At this point, we have added the record to the queue of batches if
+	   the last batch isn't full
+	 + HOWEVER, if it's full or there's no available batch in the queue to
+	   begin with, then we haven't added it to the queue of batches for that
+	   partition yet
+  -- RecordAppendResult appendResult = appendNewBatch(topic, effectivePartition, dq, timestamp, key, value, headers, callbacks, buffer, nowMs);
+     + ////// IMPORTANT SIDE NOTE /////: NOT FROM appendNewBatch code, but from
+	   earlier readings:
+	   * One batch would be for one partition in a topic, where the producer
+	     can send multiple batches that could be for different partitions
+		 (which could be from different topics)
+	 + This appends a new batch to the queue of batches for the specified
+	   partition
+	 + We pass in the allocated buffer and dq (the Deque<ProducerBatch>)
+	 + Calls RecordAccumulator.tryAppend again
+	   * If the last batch in deque is full or there's no batch in the queue
+	     to begin with (so RecordAccumulator.tryAppend returns null), then its
+		 obvious that we need to add a new batch to the queue
+	   * ME: HOWEVER, if there's a batch and it's not full, then don't we end
+	     up adding the record twice to the last batch?
+	     ** The comment says: "Somebody else found us a batch, return the one we
+	        waited for! Hopefully this doesn't happen often..."
+		    ++ ME: What exactly does this mean ???
+	 + If the result of the tryAppend is not null, just return the
+	   RecordAppendResult
+	 + If the result of the tryAppend is null, a new ProducerBatch is created
+	   * MemoryRecordsBuilder recordsBuilder = recordsBuilder(buffer)
+	     ** So we use the allocated buffer from RecordAccumulator.append's
+		    code as the new ProducerBatch's MemoryRecordsBuilder (used to
+			store records)
+	   * Create a new ProducerBatch
+	   * Add the record to this new batch
+	   * Add this batch to dq (the Deque<ProducerBatch>) as the last batch
+	   * Add this batch to the incomplete batches
+	   * Return a RecordAppendResult with newBatchCreated set to true
+	     ** ANALYSIS of batchIsFull: dq.size() > 1 || batch.isFull()
+		    ++ If there was no batch in the queue to begin with, then the very
+			   first batch for the queue would be created here
+		    ++ dq.size() would be == 1
+			++ Normally, that batch would also not be full.
+			    - UNLESS the batch size can only hold one record (based on
+				  bytes where that one record is enough to hit the bytes
+				  limit)
+			++ THEREFORE, the Sender would not be woken up in this case
+  -- RecordAccumulator.append <RETURNS> a RecordAppendResult (from appendNewBatch)
      + The append result will contain the future metadata, and flag for whether
 	   the appended batch is full or a new batch is created
-  -- **************************
-  -- ++++++++++++++++++++++++++++++++++++++++
-- If batch is full or a new batch was created, wake up the Sender
+  -- *********** end Loop ***************
+  -- FINALLY, deallocate the buffer
+  -- +++++++++++++++ end RecordAccumulator.append ++++++++++++++++++
+- ********IMPORTANT********: After the call to RecordAccumulator.append, then
+  if batch is full or a new batch was created, wake up the Sender
   -- Sender: The background thread that handles the sending of produce requests
      to the Kafka cluster. This thread makes metadata requests to renew its
 	 view of the cluster and then sends produce requests to the appropriate
 	 nodes.
+	 + https://github.com/apache/kafka/blob/trunk/clients/src/main/java/org/apache/kafka/clients/producer/internals/Sender.java#L79
+  -- ME: If a new batch is created, but it's the very first batch in the queue,
+     woudln't it not make sense to wake up the sender since we don't want to
+	 send that one and only + incomplete batch yet?
+- LASTLY, return the Future<RecordMetadata>
+- ------------ end of Steps for doSend -----------------
 
-- ------------ end of Steps -----------------
+//////////////////////////////////////////
+So far, I have 2 things I'm unsure about:
+1.) Inside appendNewBatch, we call RecordAccumulator.tryAppend
+    - But if there's a batch and it's not full, then don't we end up adding the
+	  record twice to the last batch?
+	- The comment also says: "Somebody else found us a batch, return the one we
+	  waited for! Hopefully this doesn't happen often..."
+	- From ChatGPT (DOUBLE CHECK):
+	  + The second tryAppend(...) inside appendNewBatch(...) is there because
+	    Kafka may have released the deque lock while allocating memory from
+		the buffer pool
+	  + During that gap, another producer thread might append to the same
+	    topic-partition and create a usable batch. So Kafka checks again
+	  + ME: So I was right about multithreading/concurrency/locks being at play
+	    here. I remember having to order my code a certain way from CSE 130
+		when dealing with multiple threads
+2.) In doSend's code (in KafkaProducer), if a new batch is created, but it's
+    the very first batch in the queue, wouldn't it not make sense to wake up
+	the sender since we don't want to send that one and only + incomplete
+	batch yet?
+	- This situation would happen in RecordAccumulator.tryAppend's code, where
+	  ProducerBatch last = deque.peekLast(). tryAppend ends up returning null
+	  when last is null
+    - From ChatGPT (DOUBLE CHECK THIS in Sender's code):
+	  + Even if the Sender was woken up, it's readiness logic could decide if
+	    the batch is ready. So even if we end up in the situation above, we
+		won't end up sending something prematurely. NOTE: This DOES NOT mean
+		that incomplete batches aren't allowed to be sent. Remember that there
+		are also other options such as linger.ms, etc.
+//////////////////////////////////////////
 
 
 *******************************************************************************
