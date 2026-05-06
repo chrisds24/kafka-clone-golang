@@ -1,6 +1,356 @@
 package producer
 
+import (
+	"github.com/chrisds24/kafka-clone-golang/clients/producer/internal"
+	"github.com/chrisds24/kafka-clone-golang/common"
+)
+
+// Unexported so clients need to use the constructor
+type producer struct {
+	// Config such as lingerMs, batchSize, acks, etc.
+	producerConfig common.ProducerConfig
+	metadata       *internal.ProducerMetadata
+	// TODO: RecordAccumulator accumulator
+}
+
+// Constructor for a producer
+//   - Constructors in Go: https://go.dev/doc/effective_go#composite_literals
+//     -- In the link, new returns an address
+//     -- Note that if we create a struct, put it in the variable x, then
+//     return the address of x, the struct survives after the function returns
+//   - Naming "constructors": https://go.dev/doc/effective_go#package-names
+//     -- Just call this one new since clients of the package see this as
+//     producer.New
+//   - https://stackoverflow.com/questions/18125625/constructors-in-go
+//   - https://www.reddit.com/r/golang/comments/1nc4nnh/is_using_constructor_in_golang_a_bad_pattern/
+//     -- If this returned the struct itself, instead of the pointer, the
+//     struct would be copied to the caller's stack frame
+func New(producerConfig common.ProducerConfig) *producer {
+	// TODO: Logic to initialize RecordAccumulator
+	return &producer{
+		producerConfig: producerConfig,
+		metadata:       internal.NewProducerMetadata()}
+}
+
+// FOR NOW: I won't have a doSend, only send
+func (prod *producer) Send(record common.ProducerRecord) common.RecordMetadata {
+	cluster := prod.waitOnMetadata(record.Topic, record.Partition)
+}
+
+// waitOnMetadata()
+//   - This returns a ClusterAndWaitTime, but the thing I'm interested in for
+//     now is cluster.
+//     -- https://github.com/apache/kafka/blob/trunk/clients/src/main/java/org/apache/kafka/common/Cluster.java#L35
+//   - Gonna skip a lot of stuff for now. For example, the Sender is the one
+//     responsible for the actual fetching, but I don't have a Sender for now
+//     -- I'll just
+func (prod *producer) waitOnMetadata(
+	topic string,
+	partition int,
+) *common.Cluster {
+	cluster := prod.metadata.Fetch()
+
+	// TODO: Just hardcode topics and partitions into the cluster here
+	// - Or do it when the Cluster gets initialized in its constructor
+
+	return cluster
+}
+
+func (prod *producer) partition(record common.ProducerRecord) int {
+	if record.Partition != nil {
+
+	}
+}
+
 /*
+*******************************************************************************
+*************			WHAT I'LL DO (APR 28, 2026)        *******************
+*******************************************************************************
+
+Won't include ConsoleProducer info. Also not gonna go to deep into the details
+I'm skipping multithreading/concurrency/locks concepts for now
+I'm also skipping transactions
+Basically, I'm skipping things that I don't know about or currently unsure
+	how much I need it at the moment
+
+Useful links:
+- https://github.com/apache/kafka/blob/trunk/clients/src/main/java/org/apache/kafka/clients/producer/KafkaProducer.java
+- https://github.com/apache/kafka/blob/trunk/clients/src/main/java/org/apache/kafka/clients/producer/internals/RecordAccumulator.java
+- https://github.com/apache/kafka/blob/trunk/clients/src/main/java/org/apache/kafka/clients/producer/internals/ProducerBatch.java
+
+KafkaProducer.send
+- Asynchronously send record to a topic
+- Calls doSend
+
+KafkaProducer.doSend
+  - The actual thing doing the sending to the buffer (queue of batches for a
+    partition)
+    -- As will be mentioned later, partition can either be specified in the
+    record or calculated later (in doSend or in RecordAccumulator)
+  - Wait for metadata about the cluster (so we know if the topic exists, which
+    partitions there are, which are the leader brokers for each partition, etc.)
+    -- Producer obviously needs this to be able to send to the correct
+    destination
+    -- SIDE NOTE: Metadata could be cached
+	-- This is done by calling
+	   waitOnMetadata(record.topic(), record.partition(), nowMs, maxBlockTimeMs)
+  - Serialize the key and the value
+  - Calculate the partition (could return unknown partition)
+    -- If: partition specified in record -> Just return that partition
+    -- Else if: Custom partitioner specified -> Use that to compute the partition
+    -- Else if: Key is provided and built-in partitioner doesn't ignore keys
+    -> Compute from the key
+    -- Else: No key or built-in partitioner ignores keys
+    -> return that the partition is unknown
+  - Ensure the serialized record is of valid size
+  - ********** IMPORTANT: Append to the accumulator (RecordAccumulator) by
+    calling RecordAccumulator.append:
+    RecordAccumulator.RecordAppendResult result = accumulator.append(record.topic(), partition, timestamp, serializedKey,
+    serializedValue, headers, appendCallbacks, remainingWaitMs, nowMs, cluster);
+    -- SEE DETAILS BELOW in RecordAccumulator.append
+  - ........ At this point, the record has been appended to the queue of batches,
+    but send/doSend still has some remaining things to do ........
+  - Once the append to the accumulator returns, ensure that the record's
+    partition is not unknown
+  - If batch is full or a new batch has been created, wake up the Sender
+    -- The Sender is now responsible for sending the batches to the cluster when
+    appropriate)
+    -- TODO: How should I implement this concept of being able to send to a
+    batch but have some kind "background" logic that sends batches after
+    a certain amount of time (Ex. based on linger.ms)?
+  - Will I need threads early on in the project after all?
+  - TODO: Think of an early simple way to implement linger.ms, but don't
+    spend too much time on the logic since I'll replace it anyway
+  - Return the result of the append (just a Future<RecordMetadata>)
+
+KafkaProducer.waitOnMetadata
+- IMPORTANT: I'll just go over this quick w/o diving much into the details +
+  skipping certain details.
+  -- Also: Lots of timing related stuff, which I'll skip
+- Get metadata.
+  -- If the producer already has it (cached), just use that
+  -- Otherwise, fetch it from the broker
+     + The Sender is the one responsible for the actual fetching
+	 + This "fetching" happens in a loop, where we keep on asking for metadata
+	   as long as we don't have it.
+- This returns a ClusterAndMetadata.
+  -- FOR NOW: I'm only interested in Cluster
+- *** IMPORTANT: ProducerMetadata metadata field of KafkaProducer
+  https://github.com/apache/kafka/blob/trunk/clients/src/main/java/org/apache/kafka/clients/producer/internals/ProducerMetadata.java#L37
+- *** Metadata (which ProducerMetadata extends)
+  -- https://github.com/apache/kafka/blob/trunk/clients/src/main/java/org/apache/kafka/clients/Metadata.java#L67
+	 + The fetch() function used in "Cluster cluster = metadata.fetch()" in
+	   waitOnMetadata() is actually in Metadata
+	 + fetch() calls metadataSnapshot.cluster()
+- *** MetadataSnapshot
+  https://github.com/apache/kafka/blob/trunk/clients/src/main/java/org/apache/kafka/clients/MetadataSnapshot.java#L47
+  -- Has controller, topicId, topicNames, nodes, partitions, etc.
+  -- Has the cluster function called in metadataSnapshot.cluster()
+     + cluster() simply returns clusterInstance, which is a Cluster (SEE BELOW)
+
+Cluster
+- https://github.com/apache/kafka/blob/trunk/clients/src/main/java/org/apache/kafka/common/Cluster.java#L35
+- I won't go over this, but here are some fields (NOT ALL):
+  -- private final List<Node> nodes
+  -- private final Set<String> invalidTopics
+  -- private final Node controller
+  -- private final Map<TopicPartition, PartitionInfo> partitionsByTopicPartition;
+  -- private final Map<String, List<PartitionInfo>> partitionsByTopic;
+  -- private final Map<String, Uuid> topicIds;
+  -- private final Map<Uuid, String> topicNames;
+  -- *** There's other interesting ones, but I'll just skip those.
+     + Looking at this, it's basically just metadata about the cluster
+
+RecordAccumulator (some important fields)
+  - **** I'll skip some, since I either don't understand it or don't need it at
+    the moment
+  - private final int batchSize;
+  - private final Compression compression;
+  - private final int lingerMs;
+  - private final ExponentialBackoff retryBackoff;
+  - private final int deliveryTimeoutMs;
+  - private final long partitionAvailabilityTimeoutMs;
+  - private final BufferPool free;
+    -- This is where we get a buffer from when appending a new batch since the
+    latest for a partition's queue is either full or non-existent(queue has
+    no batch to begin with)
+    -- TODO: I probably won't need a BufferPool early on, since the reason for
+    that is that the producer has memory bounds on how much memory it could
+    use and we have different threads sharing that memory
+  - Instead, maybe I can just have a maximum total number of unsent records
+    the producer can hold
+  - private final ConcurrentMap<String topic, TopicInfo> topicInfoMap
+    -- This is where we store info about each topic
+  - private final IncompleteBatches incomplete;
+    -- private final Set<ProducerBatch> incomplete;
+  - Basically a set of incomplete batches
+  - **********
+  - A RecordAccumulator can be created with a custom partitioner or using the
+    built-in (default) partitioner config
+
+-------------- Not inside RecordAccumulator, but used there ---------
+private static class TopicInfo
+  - public final ConcurrentMap<Integer partition, Deque<ProducerBatch>> batches
+    -- This is where we store the queue of batches for each partition
+  - public final BuiltInPartitioner builtInPartitioner
+
+public final class ProducerBatch
+  - final TopicPartition topicPartition
+    -- Obviously, a batch needs info about which topic and partition it is for
+  - private final MemoryRecordsBuilder recordsBuilder
+    -- This is where a ProducerBatch instance stores memory/data about records
+    -- As will be shown later, RecordAccumulator.appendNewBatch creates a
+    MemoryRecordsBuilder using an allocated buffer in
+    RecordAccumulator.append, then passes this MemoryRecordsBuilder to
+    ProducerBatch's constructor when making the new ProducerBatch instance
+  - This is when creating a new batch
+  - int recordCount;
+  - int maxRecordSize;
+
+-------------------------------------------
+
+RecordAccumulator.append
+  - DESCRIPTION: Add a record to the accumulator.
+    -- Returns the append result, which will contain the future metadata, and
+    flag for whether the appended batch is full or a new batch is created
+  - This flag will be used to wake up the sender in KafkaProducer.doSend
+    if the batch is indeed full or a new batch has been created
+  - Get TopicInfo of the topic from the topicInfoMap, or create one if it
+    doesn't exist
+  - Initialize a null ByteBuffer (used later when we need to allocate a buffer
+    that will be used by a new batch)
+    -- TODO: As mentioned above, I won't be using a BufferPool so I won't need
+    a ByteBuffer here
+  - ********************* Loop **************************
+  - ******* IMPORTANT: As mentioned above, I'll be skipping multithreading,
+    concurrency, and locks related details.
+    -- So these won't actually be run inside a loop, I JUST PUT THE LOOP
+    HERE SO I CAN EASILY COMPARE WITH THE ACTUAL CODE
+  - If partition is still unknown, find the effective partition using the
+    BuiltInPartitioner, which uses sticky partitioning
+    -- REMINDER: This BuiltInPartitioner is obtained from the TopicInfo
+  - Check if we have an in-progress batch for the specified partition
+    -- Obtain this from TopicInfo.batches
+  - This is ConcurrentMap<Integer partition, Deque<ProducerBatch>> batches
+    from above
+    -- ME: It would be more correct to say: "Check if we have a queue of batches
+    for the specified partition"
+    -- We'll try to append (RecordAccumulator.tryAppend) to this queue later.
+  - /////////// IMPORTANT CHANGE !!! /////////////
+  - Since I won't be dealing with any multithreading and buffers yet, I'll just
+    skip the first synchronized(dq) { ... tryAppend... } since it gets called
+    again in RecordAccumulator.appendNewBatch
+  - I won't need the if (buffer == null) { ... }
+  - Basically, I'm just calling appendNewBatch to call
+    RecordAccumulator.tryAppend
+  - //////////////////////////////////////////////
+  - Call RecordAccumulator.appendNewBatch, which calls
+    RecordAccumulator.tryAppend, which then calls ProducerBatch.tryAppend
+    -- RecordAppendResult appendResult = appendNewBatch(topic, effectivePartition, dq, timestamp, key, value, headers, callbacks, buffer, nowMs);
+    -- This returns RecordAppendResult
+    -- *** SEE DETAILS about RecordAccumulator.appendNewBatch,
+    RecordAccumulator.tryAppendBelow, and ProducerBatch.tryAppend below
+  - ////// IMPORTANT ////////: I'll be changing some code for these to fit
+    what I'm doing for now
+  - Finally, return the RecordAppendResult from RecordAccumulator.appendNewBatch
+  - ****************** end of Loop **********************
+
+RecordAppendResult
+  - public final FutureRecordMetadata future
+    -- Basically, just the metadata about the added record.
+  - public final boolean batchIsFull
+  - public final boolean newBatchCreated
+  - public final int appendedBytes
+  - *** NOTE: batchIsFull and newBatchCreated are the flags that doSend uses to
+    wake up the Sender
+
+public final class FutureRecordMetadata implements Future<RecordMetadata>
+
+	private final ProduceRequestResult result;
+	private final int batchIndex;
+	private final long createTimestamp;
+	private final int serializedKeySize;
+	private final int serializedValueSize;
+	private final Time time;
+
+- Notice how it implements Future<RecordMetadata>
+
+RecordAccumulator.appendNewBatch
+  - ///// IMPORTANT /////: Changing some code from the original
+  - DESCRIPTION: Append a new batch to the queue
+  - Calls RecordAccumulator.tryAppend
+  - If the append result is not null, just return it
+    -- HOWEVER: The comment in the original code: "/ Somebody else found us a
+    batch, return the one we waited for! Hopefully this doesn't happen often"
+    won't be applicable in my case
+  - If the append result is null, such as when the batch is full or there's no
+    available batch in the queue, then create a new ProducerBatch. Then:
+    -- Add the record to that newly created batch
+    -- Add this batch to the queue
+    -- Add this batch to the set of incomplete batches
+    -- Return RecordAppendResult with:
+  - batchIsFull: dq.size() > 1 || batch.isFull()
+  - newBatchCreated: true
+  - ******** NOTE *******: The result of appendNewBatch is the FINAL RETURN VALUE
+    of RecordAccumulator.append (which was called by KafkaProducer.send)
+  - NOTE: I should probably just call this something else. The main purpose
+    based on my edits is that this attempts to add to a batch in the queue
+    at least one batch exists in it and the last batch isn't full. Then if
+    the last batch is full or we didn't have any batches in the first place,
+    then we create a new batch
+
+RecordAccumulator.tryAppend
+  - ///// IMPORTANT /////: Changing some code from the original
+  - This tries to append a record to the last ProducerBatch in the queue
+  - First, get the last ProducerBatch
+  - If there's no batch to begin with, return null
+    -- RecordAccumulator.appendNewBatch can then create the batch where
+    we can add the record to
+  - If there is batch, try to append to it
+    -- CODE: FutureRecordMetadata future = last.tryAppend(timestamp, key, value, headers, callback, nowMs);
+    -- So we call ProducerBatch.tryAppend here
+    -- If the batch is full, ProducerBatch.tryAppend returns null
+  - We can then close this batch for record appends
+  - Then we just return null so RecordAccumulator.appendNewBatch can then
+    create the batch as already mentioned before
+    -- If not full, just return RecordAppendResult with:
+  - batchIsFull: deque.size() > 1 || last.isFull()
+  - newBatchCreated: false
+
+ProducerBatch.tryAppend
+  - DESCRIPTION: Append the record to the current record set and return the
+    relative offset within that record set
+  - First, check if the batch has space.
+  - If not, return null
+  - If it does, add the record to the batch
+    -- Create the FutureRecordMetadata
+    -- Increase the recordCount for this ProducerBatch
+    -- Then return the FutureRecordMetadata
+
+IMPORTANT: I'm skipping a lot of metadata request things for now, but here are
+   some useful links:
+- private ClusterAndWaitTime waitOnMetadata
+  https://github.com/apache/kafka/blob/trunk/clients/src/main/java/org/apache/kafka/clients/producer/KafkaProducer.java#L1214
+- public class FetchMetadata (the type of metadata field in KafkaProducer)
+  https://github.com/apache/kafka/blob/trunk/clients/src/main/java/org/apache/kafka/common/requests/FetchMetadata.java#L25
+- Map<TopicPartition, FetchResponseData.PartitionData> fetch(FetchRequest.Builder fetchRequest)
+  https://github.com/apache/kafka/blob/trunk/server/src/main/java/org/apache/kafka/server/LeaderEndPoint.java#L65
+  - This is the function fetch() called inside waitOnMetadata
+- FOR NOW: The producer has the metadata (since the topics and partitions are
+  hardcoded anyway)
+
+IMPORTANT: I'm also skipping a lot of the timing related things, except the
+  ones I need like those related to linger.
+
+SEE LONGER NOTES section for more details on step by step analysis of the
+  actual Kafka code.
+*/
+
+/*
+===============================================================================
+============================    LONGER NOTES    ===============================
+===============================================================================
+
 FROM KafkaProducer: https://github.com/apache/kafka/blob/trunk/clients/src/main/java/org/apache/kafka/clients/producer/KafkaProducer.java
 - NOTE: There's a lot of other useful info here, but I'll just include the ones
   I'll need for now
@@ -31,10 +381,6 @@ FROM KafkaProducer: https://github.com/apache/kafka/blob/trunk/clients/src/main/
   + However setting this to something larger than 0 can lead to fewer, more
     efficient requests when not under maximal load at the cost of a small
 	amount of latency
-
-public Future<RecordMetadata> send(ProducerRecord<K, V> record) { ...
-- Asynchronously send a record to a topic
-- Just calls the send function below with null callback
 
 public Future<RecordMetadata> send(ProducerRecord<K, V> record, Callback callback) { ...
 - Asynchronously send a record to a topic and invoke the provided callback
@@ -103,85 +449,12 @@ public class RecordAccumulator
   {@link MemoryRecords} instances to be sent to the server.
   -- The accumulator uses a bounded amount of memory and append calls will
      block when that memory is exhausted, unless this behavior is explicitly
-	 disabled.
+	   disabled.
   -- @param lingerMs An artificial delay time to add before declaring a records
      instance that isn't full ready for sending. This allows time for more
-	 records to arrive. Setting a non-zero lingerMs will trade off some
+	   records to arrive. Setting a non-zero lingerMs will trade off some
      latency for potentially better throughput due to more batching (and hence
-	 fewer, larger requests).
-- private boolean partitionChanged
-  -- Check if partition concurrently changed, or we need to complete previously
-     disabled partition change
-  -- @return 'true' if partition changed and we need to get new partition info
-     and retry, 'false' otherwise
-	 + ME: Notice how there's a waitOnMetadata function in the
-	   KafkaProducer. I think that one is more for requesting metadata on the
-       first send to the cluster.
-- public RecordAppendResult append
-  -- Add a record to the accumulator, return the append result
-  -- The append result will contain the future metadata, and flag for whether
-     the appended batch is full or a new batch is created
-  -- public synchronized SharePartition computeIfAbsent
-     + Computes the value for the given key if it is not already present in
-	   the cache. Method also updates the group map with the topic-partition
-	   for the group id.
-     + @param partitionKey The key to compute the value for.
-	 + ME: This looks like where the partition a record should go to gets
-	   calculated if a partitionKey is specified?
-	   * NOT SURE THOUGH, especially since it returns a SharePartition
-  -- public class BuiltInPartitioner
-     + The class keeps track of various bookkeeping information required for
-	   adaptive sticky partitioning (described in detail in KIP-794). There is
-	   one partitioner object per topic
-	 + ME: So this is just to decide which partition a record should go to for
-	   a topic
-  -- IMPORTANT: SEE BELOW about how KafkaProducer's doSend calculates the
-     partition, but mentions that it might happen in RecordAccumulator if
-	 the partition is still RecordMetadata.UNKNOWN_PARTITION
-  -- ByteBuffer buffer seems to be where we put the records in (as bytes)
-     + NOTE: Look at public final class ProducerBatch below
-  -- If the message doesn't have any partition affinity, so we pick a partition
-     based on the broker availability and performance.
-	 + final BuiltInPartitioner.StickyPartitionInfo partitionInfo
-	   * ME: Once again, it uses sticky partitioning
-  -- Deque<ProducerBatch> dq
-     + There's a synchronized (dq) { ... } code section under this, so that
-	   code uses multithreading/concurrency
-     + public final class ProducerBatch
-       * A batch of records that is or will be sent
-	   * This class is not thread safe and external synchronization must be used
-	     when modifying it
-       * private boolean inflight: Tracks if the batch has been sent to the
-	     NetworkClient
-	   * public FutureRecordMetadata tryAppend
-	     ** Append the record to the current record set and return the relative
-		    offset within that record set
-		 ** Calls this.recordsBuilder.append(timestamp, key, value, headers)
-		    ++ public class MemoryRecordsBuilder (ALSO IMPORTANT)
-			++ This class is used to write new log data in memory, i.e. this
-			   is the write path for {@link MemoryRecords}.
-			++ It transparently handles compression and exposes methods for
-			   appending new records, possibly with message format conversion
-  -- RecordAppendResult appendResult = tryAppend(timestamp, key, value, headers, callbacks, dq, nowMs);
-  -- private RecordAppendResult tryAppend
-     + Try to append to a ProducerBatch
-     + If it is full, we return null and a new batch is created. We also close
-	   the batch for record appends to free up resources like compression
-	   buffers. The batch will be fully closed (ie. the record batch headers
-	   will be written and memory records built) in one of the following cases
-	   (whichever comes first): right before send, if it is expired, or when
-	   the producer is closed
-	 + RecordAccumulator append method calls this
-	 + Then this does    ProducerBatch last = deque.peekLast();
-	   * Notice above how a ProducerBatch also has a tryAppend method
-  -- private RecordAppendResult appendNewBatch
-     + Append a new batch to the queue (***** IMPORTANT ******)
-	 + ME: So what exactly is the relationship between a batch and a queue?
-	   Why do we need a queue instead of just a batch?
-	 + In the code here, once the batch is added to the queue, a new batch
-	   is created
-  -- Based on the code, seems like an append to the ProducerBatch is
-     attempted, then that ProducerBatch is appended to the queue
+	   fewer, larger requests).
 
 ------------------ IMPORTANT (regarding sending records) -------------
 private Future<RecordMetadata> doSend(ProducerRecord<K, V> record, Callback callback)
@@ -228,7 +501,7 @@ public void close()
 - Called in a constructor inside a catch branch
 
 *******************************************************************************
-*****************			SUMMARY + new info         ************************
+************************			CODE ANALYSIS         ***************************
 *******************************************************************************
 When ConsoleProducer is started:
 1.) Using command line args, creates ConsoleProducerOptions
@@ -531,226 +804,4 @@ So far, I have 2 things I'm unsure about:
 *****************		end of SUMMARY + new info      ************************
 *******************************************************************************
 
-
-
-*******************************************************************************
-*************			WHAT I'LL DO (APR 28, 2026)        *******************
-*******************************************************************************
-
-Won't include ConsoleProducer info. Also not gonna go to deep into the details
-I'm skipping multithreading/concurrency/locks concepts for now
-I'm also skipping transactions
-Basically, I'm skipping things that I don't know about or currently unsure
-  how much I need it at the moment
-
-Useful links:
-- https://github.com/apache/kafka/blob/trunk/clients/src/main/java/org/apache/kafka/clients/producer/KafkaProducer.java
-- https://github.com/apache/kafka/blob/trunk/clients/src/main/java/org/apache/kafka/clients/producer/internals/RecordAccumulator.java
-- https://github.com/apache/kafka/blob/trunk/clients/src/main/java/org/apache/kafka/clients/producer/internals/ProducerBatch.java
-
-KafkaProducer.send
-- Asynchronously send record to a topic
-- Calls doSend
-
-KafkaProducer.doSend
-- The actual thing doing the sending to the buffer (queue of batches for a
-  partition)
-  -- As will be mentioned later, partition can either be specified in the
-     record or calculated later (in doSend or in RecordAccumulator)
-- Wait for metadata about the cluster (so we know if the topic exists, which
-  partitions there are, which are the leader brokers for each partition, etc.)
-  -- Producer obviously needs this to be able to send to the correct
-     destination
-  -- SIDE NOTE: Metadata could be cached
-- Serialize the key and the value
-- Calculate the partition (could return unknown partition)
-  -- If: partition specified in record -> Just return that partition
-  -- Else if: Custom partitioner specified -> Use that to compute the partition
-  -- Else if: Key is provided and built-in partitioner doesn't ignore keys
-     -> Compute from the key
-  -- Else: No key or built-in partitioner ignores keys
-     -> return that the partition is unknown
-- Ensure the serialized record is of valid size
-- ********** IMPORTANT: Append to the accumulator (RecordAccumulator) by
-  calling RecordAccumulator.append:
-	RecordAccumulator.RecordAppendResult result = accumulator.append(record.topic(), partition, timestamp, serializedKey,
-			serializedValue, headers, appendCallbacks, remainingWaitMs, nowMs, cluster);
-  -- SEE DETAILS BELOW in RecordAccumulator.append
-- ........ At this point, the record has been appended to the queue of batches,
-  but send/doSend still has some remaining things to do ........
-- Once the append to the accumulator returns, ensure that the record's
-  partition is not unknown
-- If batch is full or a new batch has been created, wake up the Sender
-  -- The Sender is now responsible for sending the batches to the cluster when
-     appropriate)
-  -- TODO: How should I implement this concept of being able to send to a
-     batch but have some kind "background" logic that sends batches after
-	 a certain amount of time (Ex. based on linger.ms)?
-	 + Will I need threads early on in the project after all?
-	 + TODO: Think of an early simple way to implement linger.ms, but don't
-	   spend too much time on the logic since I'll replace it anyway
-- Return the result of the append (just a Future<RecordMetadata>)
-
-RecordAccumulator (some important fields)
-- **** I'll skip some, since I either don't understand it or don't need it at
-  the moment
-- private final int batchSize;
-- private final Compression compression;
-- private final int lingerMs;
-- private final ExponentialBackoff retryBackoff;
-- private final int deliveryTimeoutMs;
-- private final long partitionAvailabilityTimeoutMs;
-- private final BufferPool free;
-  -- This is where we get a buffer from when appending a new batch since the
-     latest for a partition's queue is either full or non-existent(queue has
-	 no batch to begin with)
-  -- TODO: I probably won't need a BufferPool early on, since the reason for
-     that is that the producer has memory bounds on how much memory it could
-	 use and we have different threads sharing that memory
-	 + Instead, maybe I can just have a maximum total number of unsent records
-	   the producer can hold
-- private final ConcurrentMap<String topic, TopicInfo> topicInfoMap
-  -- This is where we store info about each topic
-- private final IncompleteBatches incomplete;
-  -- private final Set<ProducerBatch> incomplete;
-     + Basically a set of incomplete batches
-- **********
-- A RecordAccumulator can be created with a custom partitioner or using the
-  built-in (default) partitioner config
-
--------------- Not inside RecordAccumulator, but used there ---------
-private static class TopicInfo
-- public final ConcurrentMap<Integer partition, Deque<ProducerBatch>> batches
-  -- This is where we store the queue of batches for each partition
-- public final BuiltInPartitioner builtInPartitioner
-
-public final class ProducerBatch
-- final TopicPartition topicPartition
-  -- Obviously, a batch needs info about which topic and partition it is for
-- private final MemoryRecordsBuilder recordsBuilder
-  -- This is where a ProducerBatch instance stores memory/data about records
-  -- As will be shown later, RecordAccumulator.appendNewBatch creates a
-     MemoryRecordsBuilder using an allocated buffer in
-	 RecordAccumulator.append, then passes this MemoryRecordsBuilder to
-	 ProducerBatch's constructor when making the new ProducerBatch instance
-	 + This is when creating a new batch
-- int recordCount;
-- int maxRecordSize;
--------------------------------------------
-
-RecordAccumulator.append
-- DESCRIPTION: Add a record to the accumulator.
-  -- Returns the append result, which will contain the future metadata, and
-     flag for whether the appended batch is full or a new batch is created
-	 + This flag will be used to wake up the sender in KafkaProducer.doSend
-	   if the batch is indeed full or a new batch has been created
-- Get TopicInfo of the topic from the topicInfoMap, or create one if it
-  doesn't exist
-- Initialize a null ByteBuffer (used later when we need to allocate a buffer
-  that will be used by a new batch)
-  -- TODO: As mentioned above, I won't be using a BufferPool so I won't need
-     a ByteBuffer here
-- ********************* Loop **************************
-- ******* IMPORTANT: As mentioned above, I'll be skipping multithreading,
-  concurrency, and locks related details.
-  -- So these won't actually be run inside a loop, I JUST PUT THE LOOP
-     HERE SO I CAN EASILY COMPARE WITH THE ACTUAL CODE
-- If partition is still unknown, find the effective partition using the
-  BuiltInPartitioner, which uses sticky partitioning
-  -- REMINDER: This BuiltInPartitioner is obtained from the TopicInfo
-- Check if we have an in-progress batch for the specified partition
-  -- Obtain this from TopicInfo.batches
-     + This is ConcurrentMap<Integer partition, Deque<ProducerBatch>> batches
-	   from above
-  -- ME: It would be more correct to say: "Check if we have a queue of batches
-     for the specified partition"
-  -- We'll try to append (RecordAccumulator.tryAppend) to this queue later.
-- /////////// IMPORTANT CHANGE !!! /////////////
-- Since I won't be dealing with any multithreading and buffers yet, I'll just
-  skip the first synchronized(dq) { ... tryAppend... } since it gets called
-  again in RecordAccumulator.appendNewBatch
-- I won't need the if (buffer == null) { ... }
-- Basically, I'm just calling appendNewBatch to call
-  RecordAccumulator.tryAppend
-- //////////////////////////////////////////////
-- Call RecordAccumulator.appendNewBatch, which calls
-  RecordAccumulator.tryAppend, which then calls ProducerBatch.tryAppend
-  -- RecordAppendResult appendResult = appendNewBatch(topic, effectivePartition, dq, timestamp, key, value, headers, callbacks, buffer, nowMs);
-  -- This returns RecordAppendResult
-  -- *** SEE DETAILS about RecordAccumulator.appendNewBatch,
-     RecordAccumulator.tryAppendBelow, and ProducerBatch.tryAppend below
-	 + ////// IMPORTANT ////////: I'll be changing some code for these to fit
-	   what I'm doing for now
-- Finally, return the RecordAppendResult from RecordAccumulator.appendNewBatch
-- ****************** end of Loop **********************
-
-RecordAppendResult
-- public final FutureRecordMetadata future
-  -- Basically, just the metadata about the added record.
-- public final boolean batchIsFull
-- public final boolean newBatchCreated
-- public final int appendedBytes
-- *** NOTE: batchIsFull and newBatchCreated are the flags that doSend uses to
-  wake up the Sender
-
-public final class FutureRecordMetadata implements Future<RecordMetadata>
-    private final ProduceRequestResult result;
-    private final int batchIndex;
-    private final long createTimestamp;
-    private final int serializedKeySize;
-    private final int serializedValueSize;
-    private final Time time;
-- Notice how it implements Future<RecordMetadata>
-
-RecordAccumulator.appendNewBatch
-- ///// IMPORTANT /////: Changing some code from the original
-- DESCRIPTION: Append a new batch to the queue
-- Calls RecordAccumulator.tryAppend
-- If the append result is not null, just return it
-  -- HOWEVER: The comment in the original code: "/ Somebody else found us a
-     batch, return the one we waited for! Hopefully this doesn't happen often"
-	 won't be applicable in my case
-- If the append result is null, such as when the batch is full or there's no
-  available batch in the queue, then create a new ProducerBatch. Then:
-  -- Add the record to that newly created batch
-  -- Add this batch to the queue
-  -- Add this batch to the set of incomplete batches
-  -- Return RecordAppendResult with:
-     + batchIsFull: dq.size() > 1 || batch.isFull()
-	 + newBatchCreated: true
-- ******** NOTE *******: The result of appendNewBatch is the FINAL RETURN VALUE
-  of RecordAccumulator.append (which was called by KafkaProducer.send)
-- NOTE: I should probably just call this something else. The main purpose
-  based on my edits is that this attempts to add to a batch in the queue
-  at least one batch exists in it and the last batch isn't full. Then if
-  the last batch is full or we didn't have any batches in the first place,
-  then we create a new batch
-
-RecordAccumulator.tryAppend
-- ///// IMPORTANT /////: Changing some code from the original
-- This tries to append a record to the last ProducerBatch in the queue
-- First, get the last ProducerBatch
-- If there's no batch to begin with, return null
-  -- RecordAccumulator.appendNewBatch can then create the batch where
-     we can add the record to
-- If there is batch, try to append to it
-  -- CODE: FutureRecordMetadata future = last.tryAppend(timestamp, key, value, headers, callback, nowMs);
-  -- So we call ProducerBatch.tryAppend here
-  -- If the batch is full, ProducerBatch.tryAppend returns null
-     + We can then close this batch for record appends
-     + Then we just return null so RecordAccumulator.appendNewBatch can then
-	   create the batch as already mentioned before
-  -- If not full, just return RecordAppendResult with:
-     + batchIsFull: deque.size() > 1 || last.isFull()
-	 + newBatchCreated: false
-
-ProducerBatch.tryAppend
-- DESCRIPTION: Append the record to the current record set and return the
-  relative offset within that record set
-- First, check if the batch has space.
-- If not, return null
-- If it does, add the record to the batch
-  -- Create the FutureRecordMetadata
-  -- Increase the recordCount for this ProducerBatch
-  -- Then return the FutureRecordMetadata
 */
