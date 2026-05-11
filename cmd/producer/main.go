@@ -43,13 +43,13 @@ func main() {
 	// - RecordAccumulator uses int as the type for lingerMs
 	// batchSize: batchSize is the number of records a batch could hold
 	// - TODO: Switch to bytes later
-	// bufferMemory: bufferMemory is the number of unsent records
+	// maxUnsentRecrods: This is the number of unsent records
 	// - So this is basically 5 full batches of size 10 each
 	producerConfig := common.ProducerConfig{
-		LingerMs:     1,
-		BatchSize:    5,
-		BufferMemory: 50,
-		Acks:         "1"}
+		LingerMs:         1,
+		BatchSize:        5,
+		MaxUnsentRecords: 50, // AGAIN, REPLACE WITH BufferMemory later !!!
+		Acks:             "1"}
 
 	// TODO: Create the producer instance
 	prod := producer.New(producerConfig)

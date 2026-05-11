@@ -12,9 +12,9 @@ type Cluster struct {
 	// Map<String, List<PartitionInfo>> partitionsByTopic
 	partitionsByTopic map[string][]PartitionInfo
 	// Map<String, Uuid> topicIds
-	topicIds map[string]int
+	topicIds map[string]string // Using string instead of UUID for now
 	// Map<Uuid, String> topicNames
-	topicNames map[int]string
+	topicNames map[string]string
 }
 
 // For now, I'll make the default constructor of Cluster do what
@@ -31,8 +31,8 @@ func NewCluster() *Cluster {
 	return &Cluster{
 		partitionsByTopicPartition: make(map[TopicPartition]PartitionInfo),
 		partitionsByTopic:          make(map[string][]PartitionInfo),
-		topicIds:                   make(map[string]int),
-		topicNames:                 make(map[int]string),
+		topicIds:                   make(map[string]string),
+		topicNames:                 make(map[string]string),
 	}
 }
 

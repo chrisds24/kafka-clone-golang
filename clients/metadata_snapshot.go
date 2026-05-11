@@ -10,6 +10,12 @@ type MetadataSnapshot struct {
 	// - private Cluster clusterInstance
 	// Notice how this is a pointer. I want to avoid copying
 	clusterInstance *common.Cluster
+	// private final Map<String, Uuid> topicIds;
+	topicIds map[string]string
+	// private final Map<Uuid, String> topicNames;
+	topicNames map[string]string
+	// SKIPPING FOR NOW
+	// private final Map<TopicPartition, PartitionMetadata> metadataByPartition;
 }
 
 // For now, I'll make the constructor of MetadataSnapshot default to what
@@ -19,6 +25,8 @@ type MetadataSnapshot struct {
 func NewMetadataSnapshot() *MetadataSnapshot {
 	return &MetadataSnapshot{
 		clusterInstance: common.NewCluster(),
+		topicIds:        make(map[string]string),
+		topicNames:      make(map[string]string),
 	}
 }
 

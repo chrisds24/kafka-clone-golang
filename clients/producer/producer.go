@@ -10,7 +10,10 @@ type producer struct {
 	// Config such as lingerMs, batchSize, acks, etc.
 	producerConfig common.ProducerConfig
 	metadata       *internal.ProducerMetadata
-	// TODO: RecordAccumulator accumulator
+	// The amount of records this producer can hold (inside its
+	// RecordAccumulator)
+	maxUnsentRecords int64 // REPLACE WITH totalMemorySize int64 later!!!
+	accumulator      *internal.RecordAccumulator
 }
 
 // Constructor for a producer
@@ -26,15 +29,35 @@ type producer struct {
 //     -- If this returned the struct itself, instead of the pointer, the
 //     struct would be copied to the caller's stack frame
 func New(producerConfig common.ProducerConfig) *producer {
-	// TODO: Logic to initialize RecordAccumulator
 	return &producer{
-		producerConfig: producerConfig,
-		metadata:       internal.NewProducerMetadata()}
+		producerConfig:   producerConfig,
+		metadata:         internal.NewProducerMetadata(),
+		maxUnsentRecords: producerConfig.MaxUnsentRecords,
+		accumulator: internal.NewRecordAccumulator(
+			producerConfig.BatchSize,
+			producerConfig.LingerMs,
+			// Simplified bufferPool (Doesn't use bytes)
+			&internal.BufferPool{
+				MaxUnsentRecords:   producerConfig.MaxUnsentRecords,
+				TotalUnsentRecords: 0,
+			},
+		),
+	}
 }
 
 // FOR NOW: I won't have a doSend, only send
 func (prod *producer) Send(record common.ProducerRecord) common.RecordMetadata {
+	// SKIPPING AppendCallbacks + throwing if producer is closed or prepared
+
 	cluster := prod.waitOnMetadata(record.Topic, record.Partition)
+
+	// SKIPPING timing-related stuff + key and value serialization
+
+	partition := prod.partition(record, cluster)
+
+	// SKIPPING ensuring valid serialized record size
+
+	// TODO: Append to RecordAccumulator
 }
 
 // waitOnMetadata()
@@ -43,7 +66,6 @@ func (prod *producer) Send(record common.ProducerRecord) common.RecordMetadata {
 //     -- https://github.com/apache/kafka/blob/trunk/clients/src/main/java/org/apache/kafka/common/Cluster.java#L35
 //   - Gonna skip a lot of stuff for now. For example, the Sender is the one
 //     responsible for the actual fetching, but I don't have a Sender for now
-//     -- I'll just
 func (prod *producer) waitOnMetadata(
 	topic string,
 	partition int,
@@ -52,14 +74,30 @@ func (prod *producer) waitOnMetadata(
 
 	// TODO: Just hardcode topics and partitions into the cluster here
 	// - Or do it when the Cluster gets initialized in its constructor
+	// - I'll add them once I need it
+	//   -- Ex. I'll add to entries to Cluster's partitionsByTopicPartition,
+	//      partitionsByTopic, topicIds, topicNames, etc. when I get to the
+	//      code in producer's send method or the RecordAccumulator that uses
+	//      these values
+	//   -- DON'T FORGET MetadataSnapshot
 
 	return cluster
 }
 
-func (prod *producer) partition(record common.ProducerRecord) int {
-	if record.Partition != nil {
-
+func (prod *producer) partition(
+	record common.ProducerRecord,
+	cluster *common.Cluster,
+) int {
+	// Explicit partition specified
+	if record.Partition >= 0 {
+		return record.Partition
 	}
+
+	// SKIPPING
+	// - Custom partitioner provided
+	// - Keyed partitioning
+
+	return record.Partition // ONLY HERE to remove missing return error
 }
 
 /*
