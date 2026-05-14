@@ -1,6 +1,8 @@
 package producer
 
 import (
+	"fmt"
+
 	"github.com/chrisds24/kafka-clone-golang/clients/producer/internal"
 	"github.com/chrisds24/kafka-clone-golang/common"
 )
@@ -57,7 +59,56 @@ func (prod *producer) Send(record common.ProducerRecord) common.RecordMetadata {
 
 	// SKIPPING ensuring valid serialized record size
 
-	// TODO: Append to RecordAccumulator
+	// Append the record to the accumulator.  Note, that the actual partition may be
+	// calculated there and can be accessed via appendCallbacks.topicPartition.
+	// RecordAccumulator.RecordAppendResult result = accumulator.append(record.topic(), partition, timestamp, serializedKey,
+	// 		serializedValue, headers, appendCallbacks, remainingWaitMs, nowMs, cluster);
+	result := prod.accumulator.Append(
+		record.Topic,
+		partition,
+		record.Key,
+		record.HasKey,
+		record.Value,
+		cluster,
+	)
+
+	// SKIPPING transactions (NOT part of my project scope)
+
+	if result.BatchIsFull || result.NewBatchCreated {
+		// TODO: I can put my TEMPORARY send to broker logic here instead of
+		// having a sender
+		// - Though instead of relying on the batch simply being full or a new
+		// batch being created, I want to be able to send multiple batches in
+		// one send to the broker
+		// - In the original code, this is where the sender is woken up
+		fmt.Println("SENDING TO BROKER")
+	}
+	// return result.future; // CAN'T DO THIS YET, since
+	// RecordAccumulator.append doesn't really return RecordMetadata for my
+	// current implementation
+
+	// TODO:
+	// - Should dq be passed as a pointer or a value
+	//   -- I'm able to change dq's elements even if passed as a value
+	//   -- However, the way a slice append works is that the slice must be
+	//      assigned the new slice returned by append
+	//   -- DONE !!!
+	//   (I didn't pass dq as a pointer since we can't pass the address
+	//   of a slice in Go)
+	// - When do I stop passing HasKey?
+	// - Negative 1 (-1) is used to indicate no partition specified
+	//   -- Which pieces of code should I include a -1 check ???
+	// - What to return instead of RecordMetadata here?
+	// - TEMPORARY: Synchronous send to broker logic that doesn't use a sender
+	//   -- I can create a sendToBroker function in the recordAccumulator
+	//      that sends if lingerMs has passed
+	//   -- So I can add timing related stuff next
+	//   -- HOWEVER, it might be a waste of time to do something timing related
+	//   since it's not the actual useful implementation
+	//   -- I can probably have the sendToBroker function just check if it has
+	//   enough batches to send
+	//   -- Obviously doesn't match real Kafka behavior, but I just want to be
+	//   able to send multiple batches from multiple topics and partitions
 }
 
 // waitOnMetadata()

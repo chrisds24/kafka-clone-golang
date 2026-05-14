@@ -1,7 +1,6 @@
 package internal
 
 import (
-	"github.com/chrisds24/kafka-clone-golang/clients/producer"
 	"github.com/chrisds24/kafka-clone-golang/common"
 )
 
@@ -10,6 +9,7 @@ type ProducerBatch struct {
 
 	// SKIPPING MemoryRecordsBuilder, which takes in the ByteBuffer to
 	//   create space for a new ProducerBatch
+	// - https://github.com/apache/kafka/blob/trunk/clients/src/main/java/org/apache/kafka/common/record/internal/MemoryRecordsBuilder.java
 	// recordCount int  // SKIPPING this too since I can just do len(records)
 	// maxRecordSize int  // NOT SURE what this does yet
 
@@ -34,9 +34,13 @@ func (producerBatch *ProducerBatch) TryAppend(
 	// I'm passing this so each ProducerBatch doesn't need to track a
 	// max batch size field
 	batchSize int,
-) *producer.RecordMetadata {
+	// ) *producer.RecordMetadata {
+) bool { // TEMPORARILY returning bool for early synchronous implementation
+	// producerBatch.records should actually never be > batchSize, only equal
+	// at most
 	if len(producerBatch.records) >= batchSize {
-		return nil
+		// return nil
+		return false
 	}
 
 	// In Go, append returns a new slice but doesn't modify the original slice
@@ -62,10 +66,30 @@ func (producerBatch *ProducerBatch) TryAppend(
 	// which the broker returns (So I can only get it once the actual send
 	// to the broker is done)
 	//
-	// TODO: So instead of returning RecordMetadata here, maybe return some
+	// IMPORTANT: The reason for this is that the original code uses a Future
+	// which is asynchronous and the async send in the original can fill in
+	// these info once the promise returns.
+	// - Since I don't have an async sender yet, I have no way of setting
+	//   these info here.
+	// - I can't really get an actual RecordMetadata, which is something that
+	//   should come from the broker after the send
+	//
+	// TODO: So instead of returning RecordMetadata here, just return some
 	// other value to signify if an append was performed on the batch vs if
 	// no append was done
+	//
+	// AT THIS POINT, the only thing remaining in ProducerBatch's tryAppend in
+	// the original code is creating + returning a RecordMetadata (since I'm
+	// skipping stuff like thunks, maxRecordSize, etc.)
+	// - INSTEAD: I'll just return a boolean (false if no append happened and
+	// true if an append was indeed performed)
+	return true
+}
 
-	// BUT BASICALLY, the only thing remaining is returning RecordMetadata
-	// here (Or whatever suitable replacement value I come up with)
+// MY TEMPORARY implementation of isFull. The original is actually defined
+// in the MemoryRecordsBuilder class
+func (producerBatch *ProducerBatch) IsFull(
+	batchSize int,
+) bool {
+	return len(producerBatch.records) >= batchSize
 }

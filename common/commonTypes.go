@@ -83,7 +83,7 @@ type ProducerRecord struct {
 	Topic     string // Required
 	Partition int    // -1 means partition not specified
 	Key       string // Optional. "" (empty string) keys are allowed
-	hasKey    bool   // Flag that specifies if Key is specified
+	HasKey    bool   // Flag that specifies if Key is specified
 	Value     string // Required
 }
 
